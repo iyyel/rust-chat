@@ -1,10 +1,13 @@
-use std::net::{TcpStream};
+use std::net::{TcpStream, SocketAddr};
 use std::io::{Write, BufRead, BufReader};
 use std::io;
 use std::thread;
+use serde::{Serialize, Deserialize};
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
-    addr: String,
+    from_addr: SocketAddr,
+    name: String,
     msg: String
 }
 
@@ -27,12 +30,13 @@ impl Client {
                 let strm = stream.try_clone().unwrap();
                       // receive the echo
                       thread::spawn(move || loop {
-                        let mut data = String::new();
+                        let mut msg = String::new();
                         let mut stream = BufReader::new(&strm);
                     
-                        match stream.read_line(&mut data) {
+                        match stream.read_line(&mut msg) {
                             Ok(_) => {
-                                println!("Received: {}: {}", strm.peer_addr().unwrap(), data);
+                                let msg: Message = serde_json::from_str(&msg).unwrap();
+                                println!("Received: {:?}", msg);
                                 io::stdout().flush().unwrap();
                             }, 
                             Err(e) => {
@@ -42,11 +46,18 @@ impl Client {
                     });
 
                 loop {
-                    print!("({}) -> ", stream.peer_addr().unwrap());
+                    
+                    print!("({}) -> ", stream.local_addr().unwrap());
                     io::stdout().flush().unwrap();
                     
                     // read input from command line
                     let msg = self.read_input();
+
+                    let msg = Message {
+                        from_addr: stream.local_addr().unwrap(),
+                        name: stream.local_addr().unwrap().to_string(),
+                        msg,
+                    };
 
                     // send the message
                     self.send_msg(&mut stream, msg);
@@ -74,16 +85,16 @@ impl Client {
         }
     }
     
-    fn send_msg(&self, stream: &mut TcpStream, msg: String) {
-        match stream.write(msg.as_bytes()) {
+    fn send_msg(&self, stream: &mut TcpStream, msg: Message) {
+        let msg_str = serde_json::to_string(&msg).unwrap();
+        match stream.write(msg_str.as_bytes()) {
             Ok(_) => {
-                println!("Sent: {}: {}", stream.peer_addr().unwrap(), msg);
+                println!("Sent: {:?}", msg);
             },
             Err(e) => {
                 println!("Failed to send message: {}", e);
             }
         }
     }
-
  
 }

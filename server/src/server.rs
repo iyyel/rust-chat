@@ -1,11 +1,14 @@
 use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, SocketAddr};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use serde::{Serialize, Deserialize};
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
-    addr: String,
+    from_addr: SocketAddr,
+    name: String,
     msg: String
 }
 
@@ -41,7 +44,7 @@ impl Server {
 
             // broadcast message
             if let Ok(msg) = reciever.try_recv() {
-
+                let msg: Message = serde_json::from_str(&msg).unwrap();
                 &self.broadcast_msg(msg);
             }
 
@@ -83,7 +86,9 @@ impl Server {
 
                     let msg = String::from_utf8(msg).expect("Invalid utf8 message");
 
-                    println!("\n{}: {:?}", addr, msg);
+                    let msg_struct: Message = serde_json::from_str(&msg).unwrap();
+
+                    println!("\n{}: {:?}", addr, msg_struct);
 
                     sender.send(msg).expect("failed to send msg to reciever");
                 }
@@ -99,12 +104,12 @@ impl Server {
         });
     }
 
-    fn broadcast_msg(&self, msg: String) {
+    fn broadcast_msg(&self, msg: Message) {
         &self
             .clients
             .iter()
             .filter_map(|mut client| {
-                let buf = msg.clone().into_bytes();
+                let buf = serde_json::to_string(&msg).unwrap().into_bytes();
                 buf.clone().resize(buf.len(), 0);
                 client.write_all(&buf).map(|_| client).ok()
             })
