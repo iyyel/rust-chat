@@ -1,15 +1,15 @@
+use serde::{Deserialize, Serialize};
 use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream, SocketAddr};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     from_addr: SocketAddr,
     name: String,
-    msg: String
+    msg: String,
 }
 
 pub struct Server {
@@ -32,7 +32,7 @@ impl Server {
 
         listener
             .set_nonblocking(true)
-            .expect("Failed to set Non-Blocking state.");
+            .expect("Failed to set non-blocking state.");
 
         let (sender, reciever) = mpsc::channel::<String>();
 
@@ -54,24 +54,45 @@ impl Server {
 
     fn on_client_connect(&mut self, mut stream: TcpStream, sender: &mpsc::Sender<String>) {
         let addr = stream.peer_addr().unwrap();
-        println!("Client {:?} has connected.", addr);
+
+        let new_client_msg = Message {
+            from_addr: stream.local_addr().unwrap(),
+            name: "Server".to_string(),
+            msg: format!("Client {:?} has connected.", addr),
+        };
+
+        &self.broadcast_msg(new_client_msg);
+
+        println!("\nClient {:?} has connected.", addr);
 
         let sender = sender.clone();
         //Clone the socket to push it into a thread.
         &self
             .clients
-            .push(stream.try_clone().expect("Failed to clone the client."));
+            .push(stream.try_clone().expect("Failed to clone client stream."));
 
         thread::spawn(move || loop {
             //Create a buffer to store the msges.
             let mut buf = vec![0 as u8; 1024];
 
             //Hear socket entries from sender an match it with a Result.
+
             match stream.read(&mut buf) {
                 //a read() syscall on a socket that has been closed on the other end will return 0 bytes read,
                 //but no error, which should translate to Ok(0) in Rust.
                 //But this may only apply when the other end closed the connection cleanly.
                 Ok(0) => {
+                    /*
+                    let dis_client_msg = Message {
+                        from_addr: stream.local_addr().unwrap(),
+                        name: "Server".to_string(),
+                        msg: format!("Client {} has disconnected.", addr),
+                    };
+
+                    &self.broadcast_msg(dis_client_msg);
+
+                    */
+
                     println!("\nClient: {} has disconnected.", addr);
                     break;
                 }
@@ -105,13 +126,28 @@ impl Server {
     }
 
     fn broadcast_msg(&self, msg: Message) {
+        let mut msg_str = serde_json::to_string(&msg).unwrap();
+        // This line of code is required, as the current Rust client
+        // reads a whole line, so we need to make sure that a newline character is
+        // at the end of the message.
+        msg_str.extend("\n".chars());
+
         &self
             .clients
             .iter()
             .filter_map(|mut client| {
-                let buf = serde_json::to_string(&msg).unwrap().into_bytes();
-                buf.clone().resize(buf.len(), 0);
-                client.write_all(&buf).map(|_| client).ok()
+                match client.peer_addr() {
+                    Ok(addr) => {
+                        if addr != msg.from_addr {
+                            println!("\nBroadcast: {:?}", msg);
+                            let buf = msg_str.clone().into_bytes();
+                            buf.clone().resize(buf.len(), 0);
+                            return client.write_all(&buf).map(|_| client).ok();
+                        }
+                    }
+                    Err(e) => println!("Failed to broadcast: {}", e),
+                }
+                None
             })
             .collect::<Vec<_>>();
     }

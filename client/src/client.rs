@@ -1,14 +1,14 @@
-use std::net::{TcpStream, SocketAddr};
-use std::io::{Write, BufRead, BufReader};
+use serde::{Deserialize, Serialize};
 use std::io;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::thread;
-use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     from_addr: SocketAddr,
     name: String,
-    msg: String
+    msg: String,
 }
 
 pub struct Client {
@@ -17,39 +17,40 @@ pub struct Client {
 
 impl Client {
     pub fn new(addr: String) -> Self {
-        Self {
-            addr
-        }
+        Self { addr }
     }
 
     pub fn connect(&self) {
         match TcpStream::connect(&self.addr) {
             Ok(mut stream) => {
-                println!("Successfully established connection to server: {}", &self.addr);
-                
+                println!(
+                    "Successfully established connection to server: {}",
+                    &self.addr
+                );
+
                 let strm = stream.try_clone().unwrap();
-                      // receive the echo
-                      thread::spawn(move || loop {
-                        let mut msg = String::new();
-                        let mut stream = BufReader::new(&strm);
-                    
-                        match stream.read_line(&mut msg) {
-                            Ok(_) => {
-                                let msg: Message = serde_json::from_str(&msg).unwrap();
-                                println!("Received: {:?}", msg);
-                                io::stdout().flush().unwrap();
-                            }, 
-                            Err(e) => {
-                                println!("Error: {}", e);
-                            }
+
+                // receive server messages
+                thread::spawn(move || loop {
+                    let mut buf = String::new();
+                    let mut reader = BufReader::new(&strm);
+
+                    match reader.read_line(&mut buf) {
+                        Ok(_) => {
+                            let msg: Message = serde_json::from_str(&buf).unwrap();
+                            println!("\n{}: {:?}", msg.from_addr, msg);
+                            io::stdout().flush().unwrap();
                         }
-                    });
+                        Err(e) => {
+                            println!("Error: {}", e);
+                        }
+                    }
+                });
 
                 loop {
-                    
-                    print!("({}) -> ", stream.local_addr().unwrap());
+                    print!("\n{}: ", stream.local_addr().unwrap());
                     io::stdout().flush().unwrap();
-                    
+
                     // read input from command line
                     let msg = self.read_input();
 
@@ -62,8 +63,7 @@ impl Client {
                     // send the message
                     self.send_msg(&mut stream, msg);
                 }
-                
-            },
+            }
             Err(e) => {
                 println!("Failed to stablish connection to server: {}", e);
             }
@@ -74,9 +74,7 @@ impl Client {
         let mut msg = String::new();
         loop {
             match io::stdin().read_line(&mut msg) {
-                Ok(_) => {
-                    return msg
-                },
+                Ok(_) => return msg,
                 Err(e) => {
                     println!("Failed reading input: {}", e);
                     continue;
@@ -84,17 +82,16 @@ impl Client {
             }
         }
     }
-    
+
     fn send_msg(&self, stream: &mut TcpStream, msg: Message) {
         let msg_str = serde_json::to_string(&msg).unwrap();
         match stream.write(msg_str.as_bytes()) {
             Ok(_) => {
                 println!("Sent: {:?}", msg);
-            },
+            }
             Err(e) => {
                 println!("Failed to send message: {}", e);
             }
         }
     }
- 
 }

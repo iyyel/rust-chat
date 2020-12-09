@@ -1,5 +1,5 @@
-use std::env;
 use client::Client;
+use std::env;
 
 mod client;
 
@@ -16,6 +16,6 @@ fn main() {
 
     let address = &args[1];
     let client = Client::new(address.to_string());
-    
+
     client.connect();
 }
