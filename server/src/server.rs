@@ -66,23 +66,19 @@ impl Server {
         println!("\nClient {:?} has connected.", addr);
 
         let sender = sender.clone();
-        //Clone the socket to push it into a thread.
+        
         &self
             .clients
             .push(stream.try_clone().expect("Failed to clone client stream."));
 
         thread::spawn(move || loop {
-            //Create a buffer to store the msges.
             let mut buf = vec![0 as u8; 1024];
 
-            //Hear socket entries from sender an match it with a Result.
-
             match stream.read(&mut buf) {
-                //a read() syscall on a socket that has been closed on the other end will return 0 bytes read,
-                //but no error, which should translate to Ok(0) in Rust.
-                //But this may only apply when the other end closed the connection cleanly.
                 Ok(0) => {
                     /*
+                    Error here due to lifetime problem with &self.
+                    The thread (child) might outlive the parent process.
                     let dis_client_msg = Message {
                         from_addr: stream.local_addr().unwrap(),
                         name: "Server".to_string(),
@@ -92,13 +88,10 @@ impl Server {
                     &self.broadcast_msg(dis_client_msg);
 
                     */
-
                     println!("\nClient: {} has disconnected.", addr);
                     break;
                 }
-                //Handle when we do not read an empty socket
                 Ok(_) => {
-                    //Set the buffer as an Iretartor and take it's elements while the condition retunrs true. Finally returns a Vec of type T
                     let msg = buf
                         .clone()
                         .into_iter()
@@ -113,7 +106,8 @@ impl Server {
 
                     sender.send(msg).expect("failed to send msg to reciever");
                 }
-                //Handle reading errors!
+
+                // Handle reading errors
                 Err(ref err) if err.kind() == ErrorKind::WouldBlock => (),
                 Err(_) => {
                     println!("\nClient: {} has disconnected.", addr);
@@ -129,7 +123,7 @@ impl Server {
         let mut msg_str = serde_json::to_string(&msg).unwrap();
         // This line of code is required, as the current Rust client
         // reads a whole line, so we need to make sure that a newline character is
-        // at the end of the message.
+        // at the end of the message. This can possibly be done better?
         msg_str.extend("\n".chars());
 
         &self
