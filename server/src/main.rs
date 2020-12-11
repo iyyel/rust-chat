@@ -1,22 +1,19 @@
-use std::env;
-
+use dotenv::dotenv;
 use server::Server;
+use std::env;
 
 mod server;
 
-fn check_args(args: &Vec<String>) {
-    if args.len() != 2 {
-        println!("Please provide server address!");
-        std::process::exit(1);
-    }
-}
-
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    check_args(&args);
+    dotenv().ok();
 
-    let address = &args[1];
-    let mut server = Server::new(address.to_string());
+    let host = env::var("HOST")
+        .ok()
+        .expect("Failed to parse HOST environment variable!");
+    let port = env::var("PORT")
+        .ok()
+        .expect("Failed to parse PORT environment variable!");
 
+    let mut server = Server::new(format!("{}:{}", host, port));
     server.run();
 }

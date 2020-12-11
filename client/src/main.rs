@@ -1,21 +1,20 @@
 use client::Client;
+use dotenv::dotenv;
 use std::env;
 
 mod client;
 
-fn check_args(args: &Vec<String>) {
-    if args.len() != 2 {
-        println!("Please provide server address!");
-        std::process::exit(1);
-    }
-}
-
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    check_args(&args);
+    dotenv().ok();
 
-    let address = &args[1];
-    let client = Client::new(address.to_string());
+    let host = env::var("HOST")
+        .ok()
+        .expect("Failed to parse HOST environment variable!");
+    let port = env::var("PORT")
+        .ok()
+        .expect("Failed to parse PORT environment variable!");
+
+    let client = Client::new(format!("{}:{}", host, port));
 
     client.connect();
 }

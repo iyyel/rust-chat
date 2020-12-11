@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::TcpStream;
 use std::thread;
+use tungstenite::{stream::Stream, Message as TungMsg, WebSocket};
+use url::Url;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
-    from_addr: SocketAddr,
+    from_addr: String,
     name: String,
     msg: String,
 }
@@ -21,6 +23,46 @@ impl Client {
     }
 
     pub fn connect(&self) {
+        let url = format!("ws://{}/socket", &self.addr);
+        match tungstenite::connect(Url::parse(&url).unwrap()) {
+            Ok((mut websocket, response)) => {
+                println!(
+                    "Successfully established connection to server: {}",
+                    &self.addr
+                );
+                
+                // receive server messages
+                thread::spawn(move || loop {
+                    loop {
+                        let msg = &websocket.read_message().expect("Error reading message");
+                        println!("Received: {}", msg);
+                    }
+                });
+
+                loop {
+                    print!("\n{}: ", "local address");
+                    io::stdout().flush().unwrap();
+
+                    // read input from command line
+                    let msg = self.read_input();
+
+                    let msg = Message {
+                        from_addr: "local address".to_string(),
+                        name: "local address".to_string(),
+                        msg,
+                    };
+
+                    // send the message
+                    let msg_str = serde_json::to_string(&msg).unwrap();
+                    websocket.write_message(TungMsg::Text(msg_str.into()));
+                }
+            }
+            Err(e) => {
+                println!("Failed to stablish connection to server: {}", e);
+            }
+        }
+
+        /*
         match TcpStream::connect(&self.addr) {
             Ok(mut stream) => {
                 println!(
@@ -55,7 +97,7 @@ impl Client {
                     let msg = self.read_input();
 
                     let msg = Message {
-                        from_addr: stream.local_addr().unwrap(),
+                        from_addr: stream.local_addr().unwrap().to_string(),
                         name: stream.local_addr().unwrap().to_string(),
                         msg,
                     };
@@ -68,6 +110,7 @@ impl Client {
                 println!("Failed to stablish connection to server: {}", e);
             }
         }
+        */
     }
 
     fn read_input(&self) -> String {
@@ -79,18 +122,6 @@ impl Client {
                     println!("Failed reading input: {}", e);
                     continue;
                 }
-            }
-        }
-    }
-
-    fn send_msg(&self, stream: &mut TcpStream, msg: Message) {
-        let msg_str = serde_json::to_string(&msg).unwrap();
-        match stream.write(msg_str.as_bytes()) {
-            Ok(_) => {
-                println!("Sent: {:?}", msg);
-            }
-            Err(e) => {
-                println!("Failed to send message: {}", e);
             }
         }
     }
