@@ -1,3 +1,4 @@
+use async_std::task;
 use client::Client;
 use dotenv::dotenv;
 use std::env;
@@ -16,5 +17,5 @@ fn main() {
 
     let client = Client::new(format!("{}:{}", host, port));
 
-    client.connect();
+    task::block_on(client.connect());
 }

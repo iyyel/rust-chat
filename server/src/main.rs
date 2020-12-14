@@ -1,10 +1,12 @@
+use async_std::task;
 use dotenv::dotenv;
 use server::Server;
 use std::env;
+use std::io::Error as IoError;
 
 mod server;
 
-fn main() {
+fn main() -> Result<(), IoError> {
     dotenv().ok();
 
     let host = env::var("HOST")
@@ -14,6 +16,6 @@ fn main() {
         .ok()
         .expect("Failed to parse PORT environment variable!");
 
-    let mut server = Server::new(format!("{}:{}", host, port));
-    server.run();
+    let server = Server::new(format!("{}:{}", host, port));
+    task::block_on(server.run())
 }

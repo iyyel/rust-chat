@@ -1,153 +1,179 @@
-use serde::{Deserialize, Serialize};
-use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
-use tungstenite::{server, Message as TungMsg};
+use std::collections::HashMap;
+use std::io::Error as IoError;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+use serde::{Deserialize, Serialize};
+
+use futures::channel::mpsc::{unbounded, UnboundedSender};
+use futures::prelude::*;
+use futures::{future, pin_mut};
+
+use async_std::net::{TcpListener, TcpStream};
+use async_std::task;
+use async_tungstenite::tungstenite::protocol::Message as TungMessage;
+
+type Sender = UnboundedSender<TungMessage>;
+type PeerData = (String, Sender);
+type PeerMap = Arc<Mutex<HashMap<SocketAddr, PeerData>>>;
+
+// Add new message types:
+// Broadcast, PM
+// New Client, Disconnect
+// AssignName (MAYBE?)
+// OnlineClient Names?
+// Online client amount?
+
+#[derive(Serialize, Deserialize, Debug)]
 struct Message {
-    from_addr: String,
+    src_addr: String,
     name: String,
+    msg_type: MessageType,
     msg: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum MessageType {
+    Broadcast,
+    ChangeName(String)
 }
 
 pub struct Server {
     addr: String,
-    clients: Vec<TcpStream>,
+    peers: PeerMap,
 }
+
+const NAME: &str = "Server";
 
 impl Server {
     pub fn new(addr: String) -> Self {
         Self {
             addr,
-            clients: Vec::new(),
+            peers: PeerMap::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub fn run(&mut self) {
-        let listener = TcpListener::bind(&self.addr).unwrap();
+    pub async fn run(&self) -> Result<(), IoError> {
+        // Create the event loop and TCP listener we'll accept connections on.
+        let try_socket = TcpListener::bind(&self.addr).await;
+        let listener = try_socket.expect("Failed to bind");
+        println!("Listening on: {}", &self.addr);
 
-        println!("Listening on address: {}", self.addr);
-
-        listener
-            .set_nonblocking(true)
-            .expect("Failed to set non-blocking state.");
-
-        let (sender, reciever) = mpsc::channel::<Message>();
-
-        loop {
-            // accept incoming tcp connections
-            if let Ok((stream, _)) = listener.accept() {
-                &self.on_client_connect(stream, &sender);
-            }
-
-            // broadcast message when one is received from any sender
-            if let Ok(msg) = reciever.try_recv() {
-                println!("omfg");
-                &self.broadcast_msg(msg);
-            }
-
-            thread::sleep(Duration::from_millis(200));
+        // Let's spawn the handling of each connection in a separate task.
+        while let Ok((stream, peer_addr)) = listener.accept().await {
+            task::spawn(on_peer_connect(
+                self.peers.clone(),
+                stream,
+                self.addr.clone(),
+                peer_addr,
+            ));
         }
-    }
 
-    fn on_client_connect(&mut self, mut stream: TcpStream, sender: &mpsc::Sender<Message>) {
-        let peer_addr = stream.peer_addr().unwrap().to_string();
-        let local_addr = stream.local_addr().unwrap().to_string();
-
-        let sender = sender.clone();
-
-        let new_client_msg = Message {
-            from_addr: local_addr.clone(),
-            name: "Server".to_string(),
-            msg: format!("Client {:?} has connected.", peer_addr),
-        };
-
-        &self.broadcast_msg(new_client_msg);
-        println!("\nClient {:?} has connected.", peer_addr);
-
-        &self
-            .clients
-            .push(stream.try_clone().expect("Failed to clone client stream."));
-
-        thread::spawn(move || loop {
-            handle_msg(&mut stream, &sender)
-        });
-    }
-
-    fn broadcast_msg(&self, msg: Message) {
-        let mut msg_str = serde_json::to_string(&msg).unwrap();
-        // This line of code is required, as the current Rust client
-        // reads a whole line, so we need to make sure that a newline character is
-        // at the end of the message. This can possibly be done better?
-        msg_str.extend("\n".chars());
-
-        &self
-            .clients
-            .iter()
-            .filter_map(|mut stream| {
-                match stream.peer_addr() {
-                    Ok(addr) => {
-                        if addr.to_string() != msg.from_addr {
-                            println!("\nBroadcast: {:?}", msg);
-                            let buf = msg_str.clone().into_bytes();
-                            buf.clone().resize(buf.len(), 0);
-                            return stream.write_all(&buf).map(|_| stream).ok();
-                        }
-                        /*
-                        if addr.to_string() != msg.from_addr {
-                            let mut websocket = server::accept(stream).unwrap();
-                            println!("\nBroadcast: {:?}", msg);
-                            let buf = msg_str.clone().into_bytes();
-                            buf.clone().resize(buf.len(), 0);
-
-                            websocket.write_message(TungMsg::Text(msg_str.into())).unwrap();
-
-                            return stream.write_all(&buf).map(|_| stream).ok();
-                        }
-                        */
-                    }
-                    Err(e) => println!("Failed to broadcast: {}", e),
-                }
-                None
-            })
-            .collect::<Vec<_>>();
+        Ok(())
     }
 }
 
-fn send_disconnect_msg(local_addr: &String, peer_addr: &String, sender: &mpsc::Sender<Message>) {
+async fn on_peer_connect(
+    peers: PeerMap,
+    raw_stream: TcpStream,
+    local_addr: String,
+    peer_addr: SocketAddr,
+) {
+    println!("\nIncoming TCP connection from: {}", peer_addr);
+
+    let ws_stream = async_tungstenite::accept_async(raw_stream)
+        .await
+        .expect("Error during the websocket handshake occurred");
+
+    broadcast_new_client_msg(&peers, &local_addr, &peer_addr);
+    println!("{} has connected.", peer_addr);
+
+    // Insert the write part of this peer to the peer map.
+    let (sender, receiver) = unbounded();
+    peers.lock().unwrap().insert(peer_addr, ("no_name".to_string(), sender));
+
+    let (outgoing, incoming) = ws_stream.split();
+
+
+
+
+    let broadcast_incoming = incoming
+        .try_filter(|msg| {
+            // Broadcasting a Close message from one client
+            // will close the other clients.
+            future::ready(!msg.is_close())
+        })
+        .try_for_each(|msg| {
+            let msg: Message = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+
+            match msg.msg_type {
+                MessageType::Broadcast => {
+                    println!("\n{}: {:?}", peer_addr, msg);
+                    broadcast_msg(&peers, &peer_addr, msg);
+                },
+                MessageType::ChangeName(new_name) => {
+                    println!("wow, {}", new_name);
+                    let (old_name, s) = peers.lock().unwrap().get(&peer_addr).unwrap().clone();
+                    peers.lock().unwrap().insert(peer_addr, (new_name.clone(), s.clone()));
+
+                    let msg = Message {
+                        src_addr: local_addr.clone(),
+                        name: NAME.to_string(),
+                        msg_type: MessageType::Broadcast,
+                        msg: format!("{} is now {}", old_name, new_name),
+                    };
+
+                    broadcast_msg(&peers, &peer_addr, msg);
+                }
+            }
+
+            future::ok(())
+        });
+
+    let receive_from_others = receiver.map(Ok).forward(outgoing);
+
+    pin_mut!(broadcast_incoming, receive_from_others);
+    future::select(broadcast_incoming, receive_from_others).await;
+
+    broadcast_discon_msg(&peers, &local_addr, &peer_addr);
+    println!("{} has disconnected.", peer_addr);
+    peers.lock().unwrap().remove(&peer_addr);
+}
+
+fn broadcast_msg(peers: &PeerMap, peer_addr: &SocketAddr, msg: Message) {
+    let peers = peers.lock().unwrap();
+    let msg = TungMessage::Text(serde_json::to_string(&msg).unwrap());
+
+    // We want to broadcast the message to everyone except ourselves.
+    let broadcast_recipients = peers
+        .iter()
+        .filter(|(addr, _)| addr != &peer_addr)
+        .map(|(_, ws_sink)| ws_sink);
+
+    for (_, recp) in broadcast_recipients {
+        println!("{:?} hmm", recp);
+        recp.unbounded_send(msg.clone()).unwrap();
+    }
+}
+
+fn broadcast_new_client_msg(peers: &PeerMap, local_addr: &String, peer_addr: &SocketAddr) {
     let msg = Message {
-        from_addr: local_addr.clone(),
-        name: "Server".to_string(),
-        msg: format!("Client {} has disconnected.", peer_addr),
+        src_addr: local_addr.clone(),
+        name: NAME.to_string(),
+        msg_type: MessageType::Broadcast,
+        msg: format!("{} has connected.", peer_addr),
     };
 
-    println!("\nClient: {} has disconnected.", peer_addr);
-    sender.send(msg).expect("failed to send msg to reciever");
+    broadcast_msg(peers, peer_addr, msg);
 }
 
-fn handle_msg(stream: &mut TcpStream, sender: &mpsc::Sender<Message>) {
-    let peer_addr = stream.peer_addr().unwrap().to_string();
-    let local_addr = stream.local_addr().unwrap().to_string();
-    println!("hi!sdfsfdsf");
-    let mut websocket = server::accept(stream.try_clone().unwrap()).unwrap();
+fn broadcast_discon_msg(peers: &PeerMap, local_addr: &String, peer_addr: &SocketAddr) {
+    let msg = Message {
+        src_addr: local_addr.clone(),
+        name: NAME.to_string(),
+        msg_type: MessageType::Broadcast,
+        msg: format!("{} has disconnected.", peer_addr),
+    };
 
-    match websocket.read_message() {
-        Ok(msg) => match msg {
-            TungMsg::Text(text) => {
-                let msg: Message = serde_json::from_str(&text).unwrap();
-                println!("\n{}: {:?}", &peer_addr, msg);
-                sender.send(msg).expect("failed to send msg to reciever");
-            }
-            TungMsg::Binary(bin) => println!("\nReceived binary: {}: {:?}", &peer_addr, bin),
-            TungMsg::Close(_) => send_disconnect_msg(&local_addr, &peer_addr, &sender),
-            TungMsg::Pong(payload) => println!("\nReceived pong: {}: {:?}", &peer_addr, payload),
-            TungMsg::Ping(payload) => println!("\nReceived ping: {}: {:?}", &peer_addr, payload),
-        },
-        Err(e) => println!("\nError while handling msg: {}: {:?}", &peer_addr, e),
-    }
-
-    thread::sleep(Duration::from_millis(200));
+    broadcast_msg(peers, peer_addr, msg);
 }
