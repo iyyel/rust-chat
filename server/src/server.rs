@@ -1,3 +1,4 @@
+use rand::seq::SliceRandom;
 use std::collections::HashMap;
 use std::io::Error as IoError;
 use std::net::SocketAddr;
@@ -14,17 +15,12 @@ use async_std::task;
 use async_tungstenite::tungstenite::protocol::Message as TungMessage;
 
 type Sender = UnboundedSender<TungMessage>;
-type PeerData = (String, Sender);
-type PeerMap = Arc<Mutex<HashMap<SocketAddr, PeerData>>>;
+type PeerMap = Arc<Mutex<HashMap<SocketAddr, Sender>>>;
+type PeerNameMap = Arc<Mutex<HashMap<SocketAddr, String>>>;
 
-// Add new message types:
-// Broadcast, PM
-// New Client, Disconnect
-// AssignName (MAYBE?)
-// OnlineClient Names?
-// Online client amount?
+const NAME: &str = "Server";
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     src_addr: String,
     name: String,
@@ -32,24 +28,34 @@ struct Message {
     msg: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+// NOTES:
+//
+// Try to see if you can avoid using Ip's for communication to the peers.
+// If the peers only use communication with names, it is more secure and anonymous.
+//
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 enum MessageType {
-    Broadcast,
-    ChangeName(String)
+    NewPeer(String), // Broadcast this message to all peers when a new peer has connected. The parameter is the name of the peer that has connected.
+    LostPeer(String), // Broadcast this message to all peers when a peers has disconnected. The parameter is the name of the peer that has disconnected.
+    Text,             // Standard peer text message (broadcasted message)
+    PeerData, // If received by the server, a peer is asking to retrieve data about all connected peers. If received by a peer, it is the data from the server.
+    PeerName(String), // The server sends this message to a client when it has first connected, giving it a random name. The name is the parameter.
+    Private(String),  // A private message to the given name of a peer.
 }
 
 pub struct Server {
     addr: String,
     peers: PeerMap,
+    peer_names: PeerNameMap,
 }
-
-const NAME: &str = "Server";
 
 impl Server {
     pub fn new(addr: String) -> Self {
         Self {
             addr,
             peers: PeerMap::new(Mutex::new(HashMap::new())),
+            peer_names: PeerNameMap::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -63,6 +69,7 @@ impl Server {
         while let Ok((stream, peer_addr)) = listener.accept().await {
             task::spawn(on_peer_connect(
                 self.peers.clone(),
+                self.peer_names.clone(),
                 stream,
                 self.addr.clone(),
                 peer_addr,
@@ -75,6 +82,7 @@ impl Server {
 
 async fn on_peer_connect(
     peers: PeerMap,
+    peer_names: PeerNameMap,
     raw_stream: TcpStream,
     local_addr: String,
     peer_addr: SocketAddr,
@@ -85,17 +93,27 @@ async fn on_peer_connect(
         .await
         .expect("Error during the websocket handshake occurred");
 
-    broadcast_new_client_msg(&peers, &local_addr, &peer_addr);
-    println!("{} has connected.", peer_addr);
+    let mut names = vec!["Charles", "James"];
+    let peer_name = names.choose(&mut rand::thread_rng()).unwrap().to_string();
+    names.remove(names.iter().position(|x| *x == peer_name).unwrap());
+
+    // bind the peer address to the given name such that we can remove it
+    // later, but not re-use it while the peer is still active.
+    peer_names
+        .lock()
+        .unwrap()
+        .insert(peer_addr, peer_name.clone());
+
+    broadcast_new_peer_msg(&peers, &local_addr, &peer_addr, &peer_name);
+    println!("{} ({}) has connected.", peer_name, peer_addr);
+
+    let (sender, receiver) = unbounded();
+    send_name_msg(&sender, &peer_name, &local_addr);
 
     // Insert the write part of this peer to the peer map.
-    let (sender, receiver) = unbounded();
-    peers.lock().unwrap().insert(peer_addr, ("no_name".to_string(), sender));
+    peers.lock().unwrap().insert(peer_addr, sender);
 
     let (outgoing, incoming) = ws_stream.split();
-
-
-
 
     let broadcast_incoming = incoming
         .try_filter(|msg| {
@@ -105,26 +123,21 @@ async fn on_peer_connect(
         })
         .try_for_each(|msg| {
             let msg: Message = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            let msg_type = msg.msg_type.clone();
 
-            match msg.msg_type {
-                MessageType::Broadcast => {
+            match msg_type {
+                MessageType::Text => {
                     println!("\n{}: {:?}", peer_addr, msg);
                     broadcast_msg(&peers, &peer_addr, msg);
-                },
-                MessageType::ChangeName(new_name) => {
-                    println!("wow, {}", new_name);
-                    let (old_name, s) = peers.lock().unwrap().get(&peer_addr).unwrap().clone();
-                    peers.lock().unwrap().insert(peer_addr, (new_name.clone(), s.clone()));
-
-                    let msg = Message {
-                        src_addr: local_addr.clone(),
-                        name: NAME.to_string(),
-                        msg_type: MessageType::Broadcast,
-                        msg: format!("{} is now {}", old_name, new_name),
-                    };
-
-                    broadcast_msg(&peers, &peer_addr, msg);
                 }
+                MessageType::PeerData => {
+                    println!("\nSending client data: {}: {:?}", peer_addr, msg);
+                }
+                MessageType::Private(addr) => {
+                    let socket: SocketAddr = addr.clone().parse().unwrap();
+                    send_msg(&peers, &socket, msg);
+                }
+                _ => (),
             }
 
             future::ok(())
@@ -135,8 +148,14 @@ async fn on_peer_connect(
     pin_mut!(broadcast_incoming, receive_from_others);
     future::select(broadcast_incoming, receive_from_others).await;
 
-    broadcast_discon_msg(&peers, &local_addr, &peer_addr);
-    println!("{} has disconnected.", peer_addr);
+    let peer_names_lock = peer_names.lock().unwrap();
+    let lost_name = peer_names_lock.get(&peer_addr).unwrap();
+
+    broadcast_lost_peer_msg(&peers, &local_addr, &peer_addr, lost_name);
+    println!("{} ({}) has disconnected.", peer_name, peer_addr);
+
+    names.push(lost_name);
+    peer_names.lock().unwrap().remove(&peer_addr);
     peers.lock().unwrap().remove(&peer_addr);
 }
 
@@ -150,30 +169,60 @@ fn broadcast_msg(peers: &PeerMap, peer_addr: &SocketAddr, msg: Message) {
         .filter(|(addr, _)| addr != &peer_addr)
         .map(|(_, ws_sink)| ws_sink);
 
-    for (_, recp) in broadcast_recipients {
-        println!("{:?} hmm", recp);
+    for recp in broadcast_recipients {
         recp.unbounded_send(msg.clone()).unwrap();
     }
 }
 
-fn broadcast_new_client_msg(peers: &PeerMap, local_addr: &String, peer_addr: &SocketAddr) {
+fn send_msg(peers: &PeerMap, peer_addr: &SocketAddr, msg: Message) {
+    let peers = peers.lock().unwrap();
+    let msg = TungMessage::Text(serde_json::to_string(&msg).unwrap());
+
+    // Send only to single peer!
+    let recp = peers.get(&peer_addr).unwrap();
+    recp.unbounded_send(msg.clone()).unwrap();
+}
+
+fn broadcast_new_peer_msg(
+    peers: &PeerMap,
+    local_addr: &String,
+    peer_addr: &SocketAddr,
+    peer_name: &String,
+) {
     let msg = Message {
         src_addr: local_addr.clone(),
         name: NAME.to_string(),
-        msg_type: MessageType::Broadcast,
-        msg: format!("{} has connected.", peer_addr),
+        msg_type: MessageType::NewPeer(peer_name.clone()),
+        msg: format!("{} ({}) has connected.", peer_name, peer_addr),
     };
 
     broadcast_msg(peers, peer_addr, msg);
 }
 
-fn broadcast_discon_msg(peers: &PeerMap, local_addr: &String, peer_addr: &SocketAddr) {
+fn broadcast_lost_peer_msg(
+    peers: &PeerMap,
+    local_addr: &String,
+    peer_addr: &SocketAddr,
+    peer_name: &String,
+) {
     let msg = Message {
         src_addr: local_addr.clone(),
         name: NAME.to_string(),
-        msg_type: MessageType::Broadcast,
-        msg: format!("{} has disconnected.", peer_addr),
+        msg_type: MessageType::LostPeer(peer_name.clone()),
+        msg: format!("{} ({}) has disconnected.", peer_name, peer_addr),
     };
 
     broadcast_msg(peers, peer_addr, msg);
+}
+
+fn send_name_msg(sender: &Sender, peer_name: &String, local_addr: &String) {
+    let msg = Message {
+        src_addr: local_addr.clone(),
+        name: NAME.to_string(),
+        msg_type: MessageType::PeerName(peer_name.clone()),
+        msg: "Name message".to_string(),
+    };
+
+    let msg = TungMessage::Text(serde_json::to_string(&msg).unwrap());
+    sender.unbounded_send(msg).unwrap();
 }

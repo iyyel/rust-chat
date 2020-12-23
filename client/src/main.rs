@@ -15,7 +15,7 @@ fn main() {
         .ok()
         .expect("Failed to parse PORT environment variable!");
 
-    let client = Client::new(format!("{}:{}", host, port));
+    let mut client = Client::new(format!("{}:{}", host, port));
 
     task::block_on(client.connect());
 }
