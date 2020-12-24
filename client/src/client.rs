@@ -15,7 +15,7 @@ struct Message {
     src_addr: String,
     src_name: String,
     msg_type: MessageType,
-    msg: String,
+    text: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -32,7 +32,7 @@ enum MessageType {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct PeerData {
     count: i32,
-    peer_names: HashSet<String>
+    peer_names: HashSet<String>,
 }
 
 pub struct Client {
@@ -73,7 +73,9 @@ impl Client {
                 match msg_type {
                     MessageType::PeerName(new_name) => {
                         async_std::io::stdout()
-                            .write_all(format!("\nWelcome to Rust-Chat, {}!", new_name).as_bytes())
+                            .write_all(
+                                format!("\n[Chat] Welcome to Rust-Chat, {}!", new_name).as_bytes(),
+                            )
                             .await
                             .unwrap();
                         self.name = new_name;
@@ -96,40 +98,51 @@ impl Client {
                 match msg_type {
                     MessageType::NewPeer(peer_name) => async_std::io::stdout()
                         .write_all(
-                            format!("\n{}: {} has connected.", &msg.src_name, peer_name).as_bytes(),
+                            format!("\n[Chat] {}: {} has connected.", &msg.src_name, peer_name)
+                                .as_bytes(),
                         )
                         .await
                         .unwrap(),
                     MessageType::LostPeer(peer_name) => async_std::io::stdout()
                         .write_all(
-                            format!("\n{}: {} has disconnected.", &msg.src_name, peer_name)
-                                .as_bytes(),
+                            format!(
+                                "\n[Chat] {}: {} has disconnected.",
+                                &msg.src_name, peer_name
+                            )
+                            .as_bytes(),
                         )
                         .await
                         .unwrap(),
                     MessageType::Text => async_std::io::stdout()
-                        .write_all(format!("\n{}: {}", &msg.src_name, &msg.msg).as_bytes())
+                        .write_all(format!("\n[Chat] {}: {}", &msg.src_name, &msg.text).as_bytes())
                         .await
                         .unwrap(),
                     MessageType::PeerDataRequest => async_std::io::stdout()
-                        .write_all(format!("\n{}: {}", &msg.src_name, &msg.msg).as_bytes())
+                        .write_all(
+                            format!("\n[PeerDataRequest] {}: {}", &msg.src_name, &msg.text)
+                                .as_bytes(),
+                        )
                         .await
                         .unwrap(),
                     MessageType::PeerDataReply(peer_data) => async_std::io::stdout()
-                        .write_all(format!("\n{}: {:?}", &msg.src_name, peer_data).as_bytes())
+                        .write_all(
+                            format!("\n[PeerDataReply] {}: {:?}", &msg.src_name, peer_data)
+                                .as_bytes(),
+                        )
                         .await
                         .unwrap(),
                     MessageType::PeerName(name) => {
                         async_std::io::stdout()
                             .write_all(
-                                format!("\n{}: {}, {}", &msg.src_name, &msg.msg, name).as_bytes(),
+                                format!("\n[PeerName] {}: {}, {}", &msg.src_name, &msg.text, name)
+                                    .as_bytes(),
                             )
                             .await
                             .unwrap();
                     }
                     MessageType::Private(name) => async_std::io::stdout()
                         .write_all(
-                            format!("\n{}: {}: {}", &msg.src_name, &msg.msg, name).as_bytes(),
+                            format!("\n[PM] {}: {}: {}", &msg.src_name, &msg.text, name).as_bytes(),
                         )
                         .await
                         .unwrap(),
@@ -154,7 +167,7 @@ async fn read_stdin(
 
     loop {
         async_std::io::stdout()
-            .write_all(format!("\n{}: ", peer_name).as_bytes())
+            .write_all(format!("\n[Chat] {}: ", peer_name).as_bytes())
             .await
             .unwrap();
         async_std::io::stdout().flush().await.unwrap();
@@ -166,7 +179,14 @@ async fn read_stdin(
         };
         buf.truncate(n);
 
-        let msg = String::from_utf8(buf).unwrap();
+        let mut msg = String::from_utf8(buf).unwrap();
+
+        if msg.ends_with('\n') {
+            msg.pop();
+            if msg.ends_with('\r') {
+                msg.pop();
+            }
+        }
 
         if msg.starts_with("pm: ") {
             let split: Vec<&str> = msg.split(" ").collect();
@@ -176,7 +196,7 @@ async fn read_stdin(
                 src_addr: local_addr.to_string(),
                 src_name: peer_name.to_string(),
                 msg_type: MessageType::Private(recv_name),
-                msg: msg,
+                text: msg,
             };
 
             sender
@@ -184,12 +204,12 @@ async fn read_stdin(
                     serde_json::to_string(&msg_struct).unwrap(),
                 ))
                 .unwrap();
-        } else if msg.starts_with("peerdata: ") {
+        } else if msg.starts_with("peerdatarequest") {
             let msg_struct = Message {
                 src_addr: local_addr.to_string(),
                 src_name: peer_name.to_string(),
                 msg_type: MessageType::PeerDataRequest,
-                msg: String::from(""),
+                text: String::from(""),
             };
 
             sender
@@ -197,21 +217,19 @@ async fn read_stdin(
                     serde_json::to_string(&msg_struct).unwrap(),
                 ))
                 .unwrap();
-        
         } else {
+            let msg_struct = Message {
+                src_addr: local_addr.to_string(),
+                src_name: peer_name.to_string(),
+                msg_type: MessageType::Text,
+                text: msg,
+            };
 
-        let msg_struct = Message {
-            src_addr: local_addr.to_string(),
-            src_name: peer_name.to_string(),
-            msg_type: MessageType::Text,
-            msg: msg,
-        };
-
-        sender
-            .unbounded_send(TungMessage::Text(
-                serde_json::to_string(&msg_struct).unwrap(),
-            ))
-            .unwrap();
+            sender
+                .unbounded_send(TungMessage::Text(
+                    serde_json::to_string(&msg_struct).unwrap(),
+                ))
+                .unwrap();
         }
     }
 }

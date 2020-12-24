@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader},
 };
 
 use std::iter::FromIterator;
@@ -32,15 +32,18 @@ struct Message {
     src_addr: String,
     src_name: String,
     msg_type: MessageType,
-    msg: String,
+    text: String,
 }
 
 // NOTES:
 //
 // Try to see if you can avoid using Ip's for communication to the peers.
 // If the peers only use communication with names, it is more secure and anonymous.
-//
-// If the reicpient of a private message does not exist, send back a message to the peer telling them that the name does not exist.
+
+// 1. Add how many peer spots are left in the peerdata struct.
+// 2. Server should not display messages only made out of white spaces.
+// 3. Refactor the server code part. Refactor client with tui-rs.
+// 4. If a user connects and there are not available names left, send it a PM before its connection is closed or something.
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum MessageType {
@@ -90,7 +93,7 @@ impl Server {
                 stream,
                 self.addr.clone(),
                 peer_addr,
-                names.clone()
+                names.clone(),
             ));
         }
 
@@ -114,14 +117,17 @@ async fn on_peer_connect(
 
     let name_map = peer_name_map.lock().unwrap().clone();
     let curr_names: HashSet<String> = name_map.keys().map(|k| k.to_string()).collect();
-    let available_names: Vec<String> = names.difference(&curr_names).map(|n| n.to_string()).collect();
-    let peer_name = available_names.choose(&mut rand::thread_rng()).unwrap().to_string();
+    let available_names: Vec<String> = names
+        .difference(&curr_names)
+        .map(|n| n.to_string())
+        .collect();
+    let peer_name = available_names
+        .choose(&mut rand::thread_rng())
+        .unwrap()
+        .to_string();
     let peer_spots_left = available_names.len() - 1;
 
     // do something if there are no available names left!
-
-
-
 
     // bind the peer address to the given name such that we can remove it
     // later, but not re-use it while the peer is still active.
@@ -154,59 +160,62 @@ async fn on_peer_connect(
 
             match msg_type {
                 MessageType::Text => {
-                    println!("\n{} ({}): {}", msg.src_name, peer_addr, msg.msg);
-                    broadcast_msg(&peers, &peer_addr, msg);
-                }
+                    if !msg.text.trim().is_empty() {
+                        println!("\n[Chat] {} ({}): {}", msg.src_name, peer_addr, msg.text);
+                        broadcast_msg(&peers, &peer_addr, msg);
+                    }
+                },
                 MessageType::PeerDataRequest => {
-                    println!("\nSending peer data: {}: {:?}", peer_addr, msg);
-
                     let peer_data = create_peer_data(&peer_name_map, &msg.src_name);
 
                     let msg = Message {
                         src_addr: local_addr.clone(),
                         src_name: NAME.to_string(),
                         msg_type: MessageType::PeerDataReply(peer_data.clone()),
-                        msg: String::from(""),
+                        text: String::from(""),
                     };
 
                     println!(
-                        "\n{} ({}) -> {} ({}): {:?}",
+                        "\n[PeerDataRequest] {} ({}) -> {} ({}): {:?}",
                         NAME, local_addr, peer_name, peer_addr, peer_data
                     );
 
                     send_single_msg(&peers, &peer_addr, msg);
-                }
+                },
                 MessageType::PeerDataReply(peer_data) => {
-                    println!("\nReciving peer data: {}: {:?}", peer_addr, msg);
-                }
+                    println!("\n[PeerDataReply] {} ({}): Server received PeerDataReply. Not further action is taken:
+                    {}: {:?}", msg.src_name, peer_addr, msg.text, peer_data);
+                },
                 MessageType::Private(recv_peer_name) => {
-                    if let Some(recv_peer_addr) =
-                        &peer_name_map.lock().unwrap().get(&recv_peer_name)
-                    {
-                        if recv_peer_name != peer_name {
+                    if !msg.text.trim().is_empty() {
+                        if let Some(recv_peer_addr) =
+                            &peer_name_map.lock().unwrap().get(&recv_peer_name)
+                        {
+                            if recv_peer_name != peer_name {
+                                println!(
+                                    "\n[PM] {} ({}) -> {} ({}): {}",
+                                    msg.src_name, peer_addr, recv_peer_name, recv_peer_addr, msg.text
+                                );
+
+                                send_single_msg(&peers, recv_peer_addr, msg);
+                            }
+                        } else {
+                            let msg = Message {
+                                src_addr: local_addr.clone(),
+                                src_name: NAME.to_string(),
+                                msg_type: MessageType::Private(peer_name.clone()),
+                                text: format!("{} is not connected.", recv_peer_name),
+                            };
+
                             println!(
-                                "\n{} ({}) -> {} ({}): {}",
-                                msg.src_name, peer_addr, recv_peer_name, recv_peer_addr, msg.msg
+                                "\n[PM] {} ({}) -> {} ({}): {}",
+                                NAME, local_addr, peer_name, peer_addr, &msg.text
                             );
 
-                            send_single_msg(&peers, recv_peer_addr, msg);
+                            send_single_msg(&peers, &peer_addr, msg);
                         }
-                    } else {
-                        let msg = Message {
-                            src_addr: local_addr.clone(),
-                            src_name: NAME.to_string(),
-                            msg_type: MessageType::Private(peer_name.clone()),
-                            msg: format!("{} is not connected.", recv_peer_name),
-                        };
-
-                        println!(
-                            "\n{} ({}) -> {} ({}): {:?}",
-                            NAME, local_addr, peer_name, peer_addr, &msg.msg
-                        );
-
-                        send_single_msg(&peers, &peer_addr, msg);
                     }
-                }
+                },
                 _ => (),
             }
 
@@ -231,7 +240,7 @@ async fn on_peer_connect(
     peer_names.remove(&lost_name);
     peers.lock().unwrap().remove(&peer_addr);
     broadcast_lost_peer_msg(&peers, &local_addr, &peer_addr, &lost_name);
-    println!("{} ({}) has disconnected.", peer_name, peer_addr);
+    println!("\n[Chat] {} ({}) has disconnected.", peer_name, peer_addr);
 }
 
 fn broadcast_msg(peers: &PeerMap, peer_addr: &SocketAddr, msg: Message) {
@@ -268,7 +277,7 @@ fn broadcast_new_peer_msg(
         src_addr: local_addr.clone(),
         src_name: NAME.to_string(),
         msg_type: MessageType::NewPeer(peer_name.clone()),
-        msg: format!("{} ({}) has connected.", peer_name, peer_addr),
+        text: format!("{} ({}) has connected.", peer_name, peer_addr),
     };
 
     broadcast_msg(peers, peer_addr, msg);
@@ -284,7 +293,7 @@ fn broadcast_lost_peer_msg(
         src_addr: local_addr.clone(),
         src_name: NAME.to_string(),
         msg_type: MessageType::LostPeer(peer_name.clone()),
-        msg: format!("{} ({}) has disconnected.", peer_name, peer_addr),
+        text: format!("{} ({}) has disconnected.", peer_name, peer_addr),
     };
 
     broadcast_msg(peers, peer_addr, msg);
@@ -295,7 +304,7 @@ fn send_name_msg(sender: &Sender, peer_name: &String, local_addr: &String) {
         src_addr: local_addr.clone(),
         src_name: NAME.to_string(),
         msg_type: MessageType::PeerName(peer_name.clone()),
-        msg: "Name message".to_string(),
+        text: String::from("PeerName"),
     };
 
     let msg = TungMessage::Text(serde_json::to_string(&msg).unwrap());
