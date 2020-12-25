@@ -11,28 +11,29 @@ use async_tungstenite::async_std::connect_async;
 use async_tungstenite::tungstenite::protocol::Message as TungMessage;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct Message {
-    src_addr: String,
-    src_name: String,
-    msg_type: MessageType,
+struct Message<'a> {
+    src_name: &'a str,
+    src_addr: &'a str,
+    msg_type: MessageType<'a>,
     text: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-enum MessageType {
-    NewPeer(String), // Broadcast this message to all peers when a new peer has connected. The parameter is the name of the peer that has connected.
-    LostPeer(String), // Broadcast this message to all peers when a peers has disconnected. The parameter is the name of the peer that has disconnected.
-    Text,             // Standard peer text message (broadcasted message)
-    PeerDataRequest,
-    PeerDataReply(PeerData), // If received by the server, a peer is asking to retrieve data about all connected peers. If received by a peer, it is the data from the server.
-    PeerName(String), // The server sends this message to a client when it has first connected, giving it a random name. The name is the parameter.
-    Private(String),  // A private message to the given name of a peer.
+enum MessageType<'a> {
+    NewPeer(&'a str), // Broadcast this message to all peers when a new peer has connected. The parameter is the name of the new peer that has connected.
+    DisconPeer(&'a str), // Broadcast this message to all peers when a peer has disconnected. The parameter is the name of the peer that has disconnected.
+    PeerNameAssign(&'a str), // The server sends this message to a peer when it has first connected, giving it a random name. The name is the parameter.
+    PeerInfoRequest, // A peer sends this message to the server if the peer wants to retrieve peer info (PeerDataReply message is sent back to the peer).
+    PeerInfoReply(PeerInfo), // If the server has received a PeerDataRequest message, a peer is asking to retrieve data about all connected peers. This resides in the PeerInfo struct.
+    Private(&'a str), // A private message to the given peer. The parameter is the name of the peer receiving the message.
+    Text,             // Standard broadcasted text message to all peers.
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct PeerData {
-    count: i32,
-    peer_names: HashSet<String>,
+struct PeerInfo {
+    peers_online: i32,           // How many peers are currently online?
+    peer_spots_left: i32,        // How many available spots are left for connections?
+    peer_names: HashSet<String>, // What are the names of the connected peers? excluding the requesting peers name.
 }
 
 pub struct Client {
@@ -71,14 +72,14 @@ impl Client {
                 let msg_type = msg.msg_type.clone();
 
                 match msg_type {
-                    MessageType::PeerName(new_name) => {
+                    MessageType::PeerNameAssign(new_name) => {
                         async_std::io::stdout()
                             .write_all(
                                 format!("\n[Chat] Welcome to Rust-Chat, {}!", new_name).as_bytes(),
                             )
                             .await
                             .unwrap();
-                        self.name = new_name;
+                        self.name = new_name.to_string();
                         async_std::io::stdout().flush().await.unwrap();
                         break;
                     }
@@ -103,7 +104,7 @@ impl Client {
                         )
                         .await
                         .unwrap(),
-                    MessageType::LostPeer(peer_name) => async_std::io::stdout()
+                    MessageType::DisconPeer(peer_name) => async_std::io::stdout()
                         .write_all(
                             format!(
                                 "\n[Chat] {}: {} has disconnected.",
@@ -117,21 +118,21 @@ impl Client {
                         .write_all(format!("\n[Chat] {}: {}", &msg.src_name, &msg.text).as_bytes())
                         .await
                         .unwrap(),
-                    MessageType::PeerDataRequest => async_std::io::stdout()
+                    MessageType::PeerInfoRequest => async_std::io::stdout()
                         .write_all(
                             format!("\n[PeerDataRequest] {}: {}", &msg.src_name, &msg.text)
                                 .as_bytes(),
                         )
                         .await
                         .unwrap(),
-                    MessageType::PeerDataReply(peer_data) => async_std::io::stdout()
+                    MessageType::PeerInfoReply(peer_data) => async_std::io::stdout()
                         .write_all(
                             format!("\n[PeerDataReply] {}: {:?}", &msg.src_name, peer_data)
                                 .as_bytes(),
                         )
                         .await
                         .unwrap(),
-                    MessageType::PeerName(name) => {
+                    MessageType::PeerNameAssign(name) => {
                         async_std::io::stdout()
                             .write_all(
                                 format!("\n[PeerName] {}: {}, {}", &msg.src_name, &msg.text, name)
@@ -193,9 +194,9 @@ async fn read_stdin(
             let (recv_name, msg) = (split[1].to_string(), split[2].to_string());
 
             let msg_struct = Message {
-                src_addr: local_addr.to_string(),
-                src_name: peer_name.to_string(),
-                msg_type: MessageType::Private(recv_name),
+                src_addr: local_addr.as_str(),
+                src_name: peer_name.as_str(),
+                msg_type: MessageType::Private(recv_name.as_str()),
                 text: msg,
             };
 
@@ -206,9 +207,9 @@ async fn read_stdin(
                 .unwrap();
         } else if msg.starts_with("peerdatarequest") {
             let msg_struct = Message {
-                src_addr: local_addr.to_string(),
-                src_name: peer_name.to_string(),
-                msg_type: MessageType::PeerDataRequest,
+                src_addr: local_addr.as_str(),
+                src_name: peer_name.as_str(),
+                msg_type: MessageType::PeerInfoRequest,
                 text: String::from(""),
             };
 
@@ -219,8 +220,8 @@ async fn read_stdin(
                 .unwrap();
         } else {
             let msg_struct = Message {
-                src_addr: local_addr.to_string(),
-                src_name: peer_name.to_string(),
+                src_addr: local_addr.as_str(),
+                src_name: peer_name.as_str(),
                 msg_type: MessageType::Text,
                 text: msg,
             };

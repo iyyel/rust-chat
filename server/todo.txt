@@ -1,0 +1,8 @@
+// NOTES:
+// SERVER:
+// Try to see if you can avoid using Ip's for communication to the peers.
+// If the peers only use communication with names, it is more secure and anonymous.
+
+// 1. Server should not display messages only made out of white spaces.
+// 2. Refactor the server code part. Refactor client with tui-rs.
+// 3. If a user connects and there are not available names left, send it a PM before its connection is closed or something.

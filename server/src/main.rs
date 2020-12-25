@@ -1,8 +1,7 @@
 use async_std::task;
 use dotenv::dotenv;
 use server::Server;
-use std::env;
-use std::io::Error as IoError;
+use std::{env, io::Error as IoError};
 
 mod server;
 
