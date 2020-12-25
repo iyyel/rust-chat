@@ -1,5 +1,5 @@
 [package]
-name = "rchat_server"
+name = "server"
 version = "0.1.0"
 authors = ["iyyel <i@iyyel.io>"]
 edition = "2018"
